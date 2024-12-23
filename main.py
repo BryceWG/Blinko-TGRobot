@@ -113,7 +113,7 @@ def main():
         sys.exit(1)
 
     finally:
-        logger.info("程序��退出。")
+        logger.info("程序退出。")
 
 if __name__ == "__main__":
     main() 

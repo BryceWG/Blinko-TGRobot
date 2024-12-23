@@ -2,7 +2,13 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from src.models.user import User
 from sqlalchemy.orm import Session
+from src.services.blinko_service import BlinkoService
+from src.database import get_db_session
 import json
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 定义会话状态
 (
@@ -22,21 +28,60 @@ class CommandHandler:
     def __init__(self, db_session: Session):
         self.db_session = db_session
 
+    def _validate_url(self, url: str) -> bool:
+        """验证URL格式"""
+        url_pattern = re.compile(
+            r'^https?://'  # http:// or https://
+            r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain...
+            r'localhost|'  # localhost...
+            r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+            r'(?::\d+)?'  # optional port
+            r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+        return bool(url_pattern.match(url))
+
+    def _validate_token(self, token: str) -> bool:
+        """验证Token格式"""
+        # 这里根据实际的token格式要求进行验证
+        return bool(token and len(token) >= 32)
+
+    async def _update_user_settings(self, user_id: str, key: str, value: str) -> tuple[bool, str]:
+        """更新用户设置并返回结果"""
+        try:
+            with get_db_session() as session:
+                user = session.query(User).filter_by(telegram_id=user_id).first()
+                if not user:
+                    return False, "用户未找到"
+                
+                # 验证输入
+                if key in ['blinko_url', 'ai_config.api_endpoint']:
+                    if not self._validate_url(value):
+                        return False, "无效的URL格式"
+                elif key in ['blinko_token', 'ai_config.api_key']:
+                    if not self._validate_token(value):
+                        return False, "无效的Token格式"
+                
+                # 更新设置
+                user.update_settings(key, value)
+                return True, f"✅ {key}已更新"
+        except Exception as e:
+            logger.error(f"更新设置失败: {str(e)}")
+            return False, f"更新失败: {str(e)}"
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 /start 命令"""
         user_id = str(update.effective_user.id)
         
-        user = self.db_session.query(User).filter_by(
-            telegram_id=user_id
-        ).first()
+        with get_db_session() as session:
+            user = session.query(User).filter_by(
+                telegram_id=user_id
+            ).first()
 
-        if not user:
-            user = User(
-                telegram_id=user_id,
-                username=update.effective_user.username
-            )
-            self.db_session.add(user)
-            self.db_session.commit()
+            if not user:
+                user = User(
+                    telegram_id=user_id,
+                    username=update.effective_user.username
+                )
+                session.add(user)
 
         keyboard = [
             [InlineKeyboardButton("⚙️ 参数配置", callback_data='config')],
@@ -68,6 +113,63 @@ class CommandHandler:
 
         return CHOOSING_ACTION
 
+    async def handle_setting_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理用户输入的配置值"""
+        text = update.message.text
+        current_state = context.user_data.get('current_state')
+
+        # 根据当前状态处理不同的配置项
+        state_handlers = {
+            SETTING_BLINKO_TOKEN: ('blinko_token', "Blinko API Token"),
+            SETTING_BLINKO_URL: ('blinko_url', "服务器URL"),
+            SETTING_JINA_KEY: ('jina_key', "Jina Reader API Key"),
+            SETTING_AI_KEY: ('ai_config.api_key', "OpenAI API Key"),
+            SETTING_AI_URL: ('ai_config.api_endpoint', "OpenAI API URL"),
+            SETTING_AI_MODEL: ('ai_config.model', "OpenAI模型名称"),
+            SETTING_TAG_PROMPT: ('prompts.tag_prompt', "标签提示词"),
+            SETTING_SUMMARY_PROMPT: ('prompts.summary_prompt', "总结提示���"),
+        }
+
+        if current_state in state_handlers:
+            key, name = state_handlers[current_state]
+            success, message = await self._update_user_settings(
+                str(update.effective_user.id),
+                key,
+                text
+            )
+            
+            await update.message.reply_text(message)
+            if success:
+                return await self.start(update, context)
+            return current_state
+
+        await update.message.reply_text("❌ 未知的配置项")
+        return await self.start(update, context)
+
+    async def settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理 /settings 命令"""
+        with get_db_session() as session:
+            user = session.query(User).filter_by(
+                telegram_id=str(update.effective_user.id)
+            ).first()
+
+            if not user:
+                await update.message.reply_text("请先使用 /start 命令初始化您的账户")
+                return
+
+            # 隐藏敏感信息
+            settings_display = user.settings.copy()
+            if settings_display.get('blinko_token'):
+                settings_display['blinko_token'] = '***' + settings_display['blinko_token'][-4:]
+            if settings_display.get('ai_config', {}).get('api_key'):
+                settings_display['ai_config']['api_key'] = '***' + settings_display['ai_config']['api_key'][-4:]
+
+            settings_text = json.dumps(settings_display, indent=2, ensure_ascii=False)
+            await update.message.reply_text(
+                f"当前配置：\n{settings_text}\n\n"
+                f"使用 /start 重新配置"
+            ) 
+
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理按钮点击"""
         query = update.callback_query
@@ -92,6 +194,7 @@ class CommandHandler:
                 [InlineKeyboardButton("🔑 设置API Key", callback_data='set_ai_key')],
                 [InlineKeyboardButton("🌐 设置API URL", callback_data='set_ai_url')],
                 [InlineKeyboardButton("🤖 设置模型名称", callback_data='set_ai_model')],
+                [InlineKeyboardButton("🔄 从Blinko获取配置", callback_data='get_blinko_ai_config')],
                 [InlineKeyboardButton("⬅️ 返回", callback_data='back')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -144,28 +247,28 @@ class CommandHandler:
 
         elif query.data == 'set_ai_url':
             await query.edit_message_text(
-                text="请输入OpenAI API URL（默认为https://api.openai.com/v1）："
+                text="请输入OpenAI API URL："
             )
             context.user_data['current_state'] = SETTING_AI_URL
             return SETTING_AI_URL
 
         elif query.data == 'set_ai_model':
             await query.edit_message_text(
-                text="请输入OpenAI模型名称（默认为gpt-3.5-turbo）："
+                text="请输入OpenAI模型名称："
             )
             context.user_data['current_state'] = SETTING_AI_MODEL
             return SETTING_AI_MODEL
 
         elif query.data == 'set_tag_prompt':
             await query.edit_message_text(
-                text="请输入标签生成的提示词模板："
+                text="请输入标签生成的提示词模板（使用{content}作为内容占位符）："
             )
             context.user_data['current_state'] = SETTING_TAG_PROMPT
             return SETTING_TAG_PROMPT
 
         elif query.data == 'set_summary_prompt':
             await query.edit_message_text(
-                text="请输入内容总结的提示词模板："
+                text="请输入内容总结的提示词模板（使用{content}作为内容占位符）："
             )
             context.user_data['current_state'] = SETTING_SUMMARY_PROMPT
             return SETTING_SUMMARY_PROMPT
@@ -181,19 +284,21 @@ class CommandHandler:
             return await self.start(update, context)
 
         elif query.data == 'finish':
-            user = self.db_session.query(User).filter_by(
-                telegram_id=str(update.effective_user.id)
-            ).first()
-            
-            if not user.is_configured():
-                await query.edit_message_text(
-                    text="⚠️ 请先完成基本配置（Blinko Token和URL）"
-                )
-                return await self.start(update, context)
-            
-            user.is_active = True
-            self.db_session.commit()
-            
+            with get_db_session() as session:
+                user = session.query(User).filter_by(
+                    telegram_id=str(update.effective_user.id)
+                ).first()
+                
+                if not user.is_configured():
+                    await query.edit_message_text(
+                        text="⚠️ 请先完成所有必需配置：\n"
+                             "1. Blinko Token和URL\n"
+                             "2. OpenAI API Key、URL和模型名称"
+                    )
+                    return await self.start(update, context)
+                
+                user.is_active = True
+                
             await query.edit_message_text(
                 text="✅ 配置完成！\n"
                      "现在您可以：\n"
@@ -203,75 +308,55 @@ class CommandHandler:
             )
             return ConversationHandler.END
 
-    async def handle_setting_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理用户输入的配置值"""
-        user = self.db_session.query(User).filter_by(
-            telegram_id=str(update.effective_user.id)
-        ).first()
-
-        if not user:
-            await update.message.reply_text("请先使用 /start 命令初始化您的账户")
-            return ConversationHandler.END
-
-        text = update.message.text
-        current_state = context.user_data.get('current_state')
-
-        # 根据当前状态处理不同的配置项
-        state_handlers = {
-            SETTING_BLINKO_TOKEN: ('blinko_token', "Blinko API Token"),
-            SETTING_BLINKO_URL: ('blinko_url', "服务器URL"),
-            SETTING_JINA_KEY: ('jina_key', "Jina Reader API Key"),
-            SETTING_AI_KEY: ('ai_config.api_key', "OpenAI API Key"),
-            SETTING_AI_URL: ('ai_config.api_endpoint', "OpenAI API URL"),
-            SETTING_AI_MODEL: ('ai_config.model', "OpenAI模型名称"),
-            SETTING_TAG_PROMPT: ('prompts.tag_prompt', "标签提示词"),
-            SETTING_SUMMARY_PROMPT: ('prompts.summary_prompt', "总结提示词"),
-        }
-
-        if current_state in state_handlers:
-            key, name = state_handlers[current_state]
-            
-            # 获取当前设置
-            settings = user.settings.copy()
-            
-            # 处理嵌套的配置项
-            if '.' in key:
-                section, subkey = key.split('.')
-                if section not in settings:
-                    settings[section] = {}
-                settings[section][subkey] = text
-            else:
-                settings[key] = text
-            
-            # 更新用户设置
-            user._settings = settings
-            self.db_session.commit()
-            
-            await update.message.reply_text(f"✅ {name}已更新！")
-            return await self.start(update, context)
-
-        await update.message.reply_text("❌ 未知的配置项")
-        return await self.start(update, context)
-
-    async def settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理 /settings 命令"""
-        user = self.db_session.query(User).filter_by(
-            telegram_id=str(update.effective_user.id)
-        ).first()
-
-        if not user:
-            await update.message.reply_text("请先使用 /start 命令初始化您的账户")
-            return
-
-        # 隐藏敏感信息
-        settings_display = user.settings.copy()
-        if settings_display.get('blinko_token'):
-            settings_display['blinko_token'] = '***' + settings_display['blinko_token'][-4:]
-        if settings_display.get('ai_config', {}).get('api_key'):
-            settings_display['ai_config']['api_key'] = '***' + settings_display['ai_config']['api_key'][-4:]
-
-        settings_text = json.dumps(settings_display, indent=2, ensure_ascii=False)
-        await update.message.reply_text(
-            f"当前配置：\n{settings_text}\n\n"
-            f"使用 /start 重新配置"
-        ) 
+        elif query.data == 'get_blinko_ai_config':
+            with get_db_session() as session:
+                user = session.query(User).filter_by(
+                    telegram_id=str(update.effective_user.id)
+                ).first()
+                
+                if not user.is_configured():
+                    await query.edit_message_text(
+                        text="⚠️ 请先配置Blinko Token和URL"
+                    )
+                    return await self.start(update, context)
+                
+                try:
+                    # 创建临时BlinkoService实例
+                    blinko_config = {
+                        "blinko_url": user.settings.get("blinko_url"),
+                        "blinko_token": user.settings.get("blinko_token")
+                    }
+                    blinko_service = BlinkoService(blinko_config)
+                    
+                    # 获取AI配置
+                    result = await blinko_service._make_request("GET", "/api/v1/config/list")
+                    await blinko_service.close()
+                    
+                    if "error" in result:
+                        raise Exception(result["error"])
+                    
+                    # 更新用户配置
+                    settings = user.settings.copy()
+                    if "ai_config" not in settings:
+                        settings["ai_config"] = {}
+                    
+                    # 更新配置
+                    settings["ai_config"].update({
+                        "api_key": result.get("api_key"),
+                        "api_endpoint": result.get("api_endpoint"),
+                        "model": result.get("model")
+                    })
+                    
+                    user._settings = settings
+                    
+                    await query.edit_message_text(
+                        text="✅ 已从Blinko获取并更新AI配置！"
+                    )
+                    return await self.start(update, context)
+                    
+                except Exception as e:
+                    await query.edit_message_text(
+                        text=f"❌ 获取AI配置失败: {str(e)}\n"
+                             f"请检查Blinko配置是否正确。"
+                    )
+                    return await self.start(update, context) 

@@ -1,7 +1,6 @@
 # src/handlers/note_handler.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from typing import Dict, List
 from src.models.session import UserSession, NoteState, MessageType, NoteContent
 from src.services.ai_service import AIService
 from src.services.blinko_service import BlinkoService

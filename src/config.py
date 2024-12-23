@@ -10,20 +10,11 @@ class Config:
     # Bot配置
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
-    # Blinko API配置
-    BLINKO_API_URL = os.getenv("BLINKO_API_URL")
-    BLINKO_API_KEY = os.getenv("BLINKO_API_KEY")
-    
     # 数据库配置
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///bot_data.db")
     
     # 代理配置
     PROXY_URL = os.getenv("PROXY_URL")  # 例如: socks5://127.0.0.1:7890
-    
-    # OpenAI配置
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    OPENAI_API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
     
     @classmethod
     def validate(cls):

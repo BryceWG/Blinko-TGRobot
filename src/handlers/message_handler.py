@@ -3,7 +3,6 @@ from telegram.ext import ContextTypes
 from src.services.blinko_api import BlinkoAPI
 from src.models.user import User
 from sqlalchemy.orm import Session
-from typing import Optional
 
 class MessageHandler:
     def __init__(self, db_session: Session):
