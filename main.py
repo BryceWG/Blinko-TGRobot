@@ -92,8 +92,18 @@ def create_application():
     # 添加处理器
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("settings", command_handler.settings))
+    
+    # 添加消息处理器
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, note_handler.handle_message))
+    application.add_handler(MessageHandler(filters.PHOTO, note_handler.handle_message))
+    application.add_handler(MessageHandler(filters.AUDIO, note_handler.handle_message))
+    application.add_handler(MessageHandler(filters.VIDEO, note_handler.handle_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, note_handler.handle_message))
+    
+    # 添加回调查询处理器
     application.add_handler(CallbackQueryHandler(note_handler.handle_callback))
+    
+    # 添加错误处理器
     application.add_error_handler(error_handler)
 
     return application

@@ -127,7 +127,7 @@ class CommandHandler:
             SETTING_AI_URL: ('ai_config.api_endpoint', "OpenAI API URL"),
             SETTING_AI_MODEL: ('ai_config.model', "OpenAI模型名称"),
             SETTING_TAG_PROMPT: ('prompts.tag_prompt', "标签提示词"),
-            SETTING_SUMMARY_PROMPT: ('prompts.summary_prompt', "总结提示���"),
+            SETTING_SUMMARY_PROMPT: ('prompts.summary_prompt', "总结提示词"),
         }
 
         if current_state in state_handlers:
@@ -289,13 +289,44 @@ class CommandHandler:
                     telegram_id=str(update.effective_user.id)
                 ).first()
                 
-                if not user.is_configured():
+                if not user.is_blinko_configured():
                     await query.edit_message_text(
-                        text="⚠️ 请先完成所有必需配置：\n"
-                             "1. Blinko Token和URL\n"
-                             "2. OpenAI API Key、URL和模型名称"
+                        text="⚠️ 请先完成Blinko配置：\n"
+                             "1. Blinko Token\n"
+                             "2. Blinko URL"
                     )
                     return await self.start(update, context)
+                
+                # 如果已配置Blinko，尝试获取AI配置
+                if not user.is_ai_configured():
+                    try:
+                        # 创建临时BlinkoService实例
+                        blinko_config = {
+                            "blinko_url": user.settings.get("blinko_url"),
+                            "blinko_token": user.settings.get("blinko_token")
+                        }
+                        blinko_service = BlinkoService(blinko_config)
+                        
+                        # 获取AI配置
+                        result = await blinko_service._make_request("GET", "/api/v1/config/list")
+                        await blinko_service.close()
+                        
+                        if "error" not in result:
+                            # 更新配置
+                            settings = user.settings.copy()
+                            if "ai_config" not in settings:
+                                settings["ai_config"] = {}
+                            
+                            settings["ai_config"].update({
+                                "api_key": result.get("api_key"),
+                                "api_endpoint": result.get("api_endpoint"),
+                                "model": result.get("model")
+                            })
+                            
+                            user._settings = settings
+                            logger.info(f"已自动从Blinko获取AI配置: {settings['ai_config']}")
+                    except Exception as e:
+                        logger.warning(f"自动获取AI配置失败: {str(e)}")
                 
                 user.is_active = True
                 
@@ -314,7 +345,7 @@ class CommandHandler:
                     telegram_id=str(update.effective_user.id)
                 ).first()
                 
-                if not user.is_configured():
+                if not user.is_blinko_configured():
                     await query.edit_message_text(
                         text="⚠️ 请先配置Blinko Token和URL"
                     )

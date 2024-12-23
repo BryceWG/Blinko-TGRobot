@@ -102,19 +102,27 @@ class User(Base):
         # 记录更新
         logger.info(f"用户 {self.telegram_id} 更新设置: {key} = {value}")
 
-    def is_configured(self) -> bool:
-        """检查是否已完成基本配置"""
+    def is_blinko_configured(self) -> bool:
+        """检查Blinko配置是否完成"""
         settings = self.settings
-        ai_config = settings.get('ai_config', {})
-        
-        # 检查所有必需的配置项
         return bool(
             settings.get('blinko_token') and
-            settings.get('blinko_url') and
+            settings.get('blinko_url')
+        )
+
+    def is_ai_configured(self) -> bool:
+        """检查AI配置是否完成"""
+        settings = self.settings
+        ai_config = settings.get('ai_config', {})
+        return bool(
             ai_config.get('api_key') and
             ai_config.get('api_endpoint') and
             ai_config.get('model')
         )
+
+    def is_configured(self) -> bool:
+        """检查是否已完成基本配置"""
+        return self.is_blinko_configured() or self.is_ai_configured()
 
     def get_prompts(self) -> dict:
         """获取提示词配置"""

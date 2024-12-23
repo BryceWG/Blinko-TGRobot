@@ -4,41 +4,26 @@ from src.models.session import NoteContent, MessageType
 import logging
 import asyncio
 from aiohttp import ClientTimeout, ClientError
+import json
+from typing import Optional
+import base64
+from io import BytesIO
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 class AIService:
-    def __init__(self, config: dict):
-        """初始化AI服务
-        
-        Args:
-            config (dict): 配置信息，包含：
-                - api_key: OpenAI API密钥
-                - api_endpoint: OpenAI API端点
-                - model: 模型名称
-                - prompts: 提示词配置
-                    - tag_prompt: 标签生成提示词
-                    - summary_prompt: 内容总结提示词
-        """
-        self.config = config or {}
-        self.api_key = config.get("api_key")
-        self.api_endpoint = config.get("api_endpoint", "https://api.openai.com/v1")
-        self.model = config.get("model", "gpt-3.5-turbo")
+    def __init__(self, config: Dict[str, Any]):
+        """初始化AI服务"""
+        self.config = config
+        self.api_key = config.get("openai_key")
+        self.api_base = config.get("openai_base", "https://api.openai.com/v1")
+        self.model = config.get("model", "gpt-4-vision-preview")
+        self.max_tokens = config.get("max_tokens", 500)
+        self.temperature = config.get("temperature", 0.7)
         self.prompts = config.get("prompts", {})
-        
         self.session = None
         self.timeout = ClientTimeout(total=30)
-        self.max_retries = 3
-        self.retry_delay = 1
-
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        await self._get_session()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self.close()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建会话"""
@@ -52,51 +37,34 @@ class AIService:
             await self.session.close()
             self.session = None
 
-    async def _make_request(self, url: str, **kwargs) -> Dict[str, Any]:
-        """发送请求并处理响应"""
-        if not self.api_key:
-            return {"error": "未配置OpenAI API Key"}
+    async def _make_request(self, endpoint: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """发送请求到OpenAI API"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
             
-        retries = 0
-        last_exception = None
-
-        while retries < self.max_retries:
-            try:
-                session = await self._get_session()
-                async with session.request("POST", url, **kwargs) as response:
-                    if response.status == 429:  # 速率限制
-                        retry_after = int(response.headers.get('Retry-After', self.retry_delay))
-                        await asyncio.sleep(retry_after)
-                        retries += 1
-                        continue
-                        
-                    if response.status != 200:
-                        text = await response.text()
-                        logger.error(f"OpenAI请求失败: {text}")
-                        return {"error": f"请求失败: {response.status}", "details": text}
-                    
+            session = await self._get_session()
+            async with session.post(
+                f"{self.api_base}/{endpoint}",
+                headers=headers,
+                json=data
+            ) as response:
+                if response.status == 200:
                     return await response.json()
-
-            except asyncio.TimeoutError as e:
-                logger.warning(f"OpenAI请求超时 (重试 {retries + 1}/{self.max_retries})")
-                last_exception = e
-            except ClientError as e:
-                logger.warning(f"OpenAI请求错误: {str(e)} (重试 {retries + 1}/{self.max_retries})")
-                last_exception = e
-            except Exception as e:
-                logger.error(f"未预期的错误: {str(e)}")
-                return {"error": f"请求异常: {str(e)}"}
-
-            retries += 1
-            if retries < self.max_retries:
-                await asyncio.sleep(self.retry_delay * retries)
-
-        return {"error": f"重试{self.max_retries}次后失败: {str(last_exception)}"}
+                else:
+                    error_text = await response.text()
+                    logger.error(f"API请求失败: {response.status} - {error_text}")
+                    return None
+        except Exception as e:
+            logger.error(f"API请求异常: {str(e)}", exc_info=True)
+            return None
 
     async def _call_openai(self, prompt: str) -> str:
         """调用OpenAI API"""
         result = await self._make_request(
-            f"{self.api_endpoint}/chat/completions",
+            f"{self.api_base}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
@@ -106,7 +74,9 @@ class AIService:
                 "messages": [
                     {"role": "system", "content": "你是一个专业的内容分析助手。"},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1000
             }
         )
         
@@ -154,7 +124,7 @@ class AIService:
 
         return await self._call_openai(prompt)
 
-    async def generate_tags(self, contents: List[str], existing_tags: List[str]) -> List[str]:
+    async def generate_tags(self, contents: List[str], existing_tags: List[str]) -> str:
         """生成标签建议
         
         Args:
@@ -162,7 +132,7 @@ class AIService:
             existing_tags: Blinko中已有的标签列表
         
         Returns:
-            List[str]: 建议的标签列表
+            str: 标签建议文本，每行一个标签及其推荐理由
         """
         # 构建提示词
         content_text = " ".join(contents)
@@ -197,19 +167,7 @@ Blinko系统中已有的标签：
         )
 
         # 调用AI服务获取标签建议
-        tags_text = await self._call_openai(prompt)
-        
-        # 处理返回的标签
-        tags = []
-        for line in tags_text.split('\n'):
-            if not line.strip():
-                continue
-            # 提取标签名（去掉推荐理由部分）
-            tag = line.split('-')[0].strip().strip('#').strip()
-            if tag:
-                tags.append(tag)
-        
-        return tags[:8]  # 最多返回8个标签
+        return await self._call_openai(prompt)
 
     async def parse_file(self, file_type: str, file_info: Dict) -> str:
         """解析文件内容"""
@@ -227,3 +185,117 @@ Blinko系统中已有的标签：
             return "视频解析功能开发中..."
         
         return "不支持的文件类型"
+
+    async def describe_image(self, image_url: str) -> Optional[str]:
+        """生成图片描述"""
+        try:
+            # 准备消息
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.prompts.get("image_description", "请详细描述这张图片的内容，包括主要对象、场景、颜色、布局等关键信息。使用简洁明了的语言。")
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "请描述这张图片"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": image_url
+                        }
+                    ]
+                }
+            ]
+            
+            # 准备请求数据
+            data = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature
+            }
+            
+            # 发送请求
+            response = await self._make_request("chat/completions", data)
+            
+            if response and response.get("choices"):
+                return response["choices"][0]["message"]["content"].strip()
+            
+            return None
+        
+        except Exception as e:
+            logger.error(f"生成图片描述失败: {str(e)}", exc_info=True)
+            return None
+
+    async def generate_tags(self, content: str) -> Optional[str]:
+        """生成标签"""
+        try:
+            # 准备消息
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.prompts.get("tag_generation", "请为以下内容生成相关的标签。标签应该简洁、准确，并且能够反映内容的主要主题和关键概念。")
+                },
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+            
+            # 准备请求数据
+            data = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature
+            }
+            
+            # 发送请求
+            response = await self._make_request("chat/completions", data)
+            
+            if response and response.get("choices"):
+                return response["choices"][0]["message"]["content"].strip()
+            
+            return None
+        
+        except Exception as e:
+            logger.error(f"生成标签失败: {str(e)}", exc_info=True)
+            return None
+
+    async def generate_summary(self, content: str) -> Optional[str]:
+        """生成内容摘要"""
+        try:
+            # 准备消息
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.prompts.get("summary_generation", "请为以下内容生成一个简洁的摘要，突出重点信息。")
+                },
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+            
+            # 准备请求数据
+            data = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature
+            }
+            
+            # 发送请求
+            response = await self._make_request("chat/completions", data)
+            
+            if response and response.get("choices"):
+                return response["choices"][0]["message"]["content"].strip()
+            
+            return None
+        
+        except Exception as e:
+            logger.error(f"生成摘要失败: {str(e)}", exc_info=True)
+            return None
