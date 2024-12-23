@@ -1,0 +1,7 @@
+*.env
+.cursorrules
+bot_data.db
+blinko-tgrobot
+*.pyc
+*.txt
+PKG-INFO
